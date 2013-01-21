@@ -1,13 +1,17 @@
 package com.hrdapp.android.DroidControl;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.ref.WeakReference;
-
-import com.hrdapp.android.DroidControl.R.id;
-
+import java.net.ServerSocket;
+import java.net.Socket;
 import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.content.Intent;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -18,13 +22,15 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.Window;
 import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.CompoundButton.OnCheckedChangeListener;
 import android.widget.SeekBar;
 import android.widget.SeekBar.OnSeekBarChangeListener;
 import android.widget.TextView;
 import android.widget.Toast;
 
 
-public class DroidControlActivity extends Activity {
+public class DroidControlActivity extends Activity implements Runnable{
 
     // Message types sent from the BluetoothChatService Handler
     public static final int MESSAGE_STATE_CHANGE = 1;
@@ -55,6 +61,15 @@ public class DroidControlActivity extends Activity {
     // Member object for the chat services
     private BluetoothDroidControlService mCmdSendService = null;
 
+    SeekBar seekBar;
+    CheckBox checkBox1;
+    CheckBox checkBox2;
+    
+    private ServerSocket mServer = null;
+    private Socket mSocket =null;
+    int mPort = 8081;
+    volatile Thread mRunner = null;
+    
     /** Called when the activity is first created. */
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -63,7 +78,22 @@ public class DroidControlActivity extends Activity {
         setContentView(R.layout.main);
         getWindow().setFeatureInt(Window.FEATURE_CUSTOM_TITLE, R.layout.custom_title);
     
-        SeekBar seekBar = (SeekBar) findViewById(id.seekBar1);
+        WifiManager wifiManager =  (WifiManager) getSystemService(WIFI_SERVICE);
+        WifiInfo wifIinfo = wifiManager.getConnectionInfo();
+        int address = wifIinfo.getIpAddress();
+        String ipAddressStr = ((address >> 0) & 0xFF) + "."
+                + ((address >> 8) & 0xFF) + "." + ((address >> 16) & 0xFF)
+                + "." + ((address >> 24) & 0xFF);
+
+         TextView tv = (TextView) findViewById(R.id.tv1);
+         tv.setText(ipAddressStr);
+         
+         if(mRunner == null){
+             mRunner = new Thread(this);
+             mRunner.start();
+         }
+        
+        seekBar = (SeekBar) findViewById(R.id.seekBar1);
         seekBar.setMax(100);
         seekBar.setProgress(50);
         seekBar.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
@@ -85,45 +115,34 @@ public class DroidControlActivity extends Activity {
                     String.valueOf(seekBar.getProgress()));
             }
         });
-        CheckBox checkBox1 = (CheckBox) findViewById(id.led1);
+        checkBox1 = (CheckBox) findViewById(R.id.led1);
         // チェックボックスのチェック状態を設定します
         checkBox1.setChecked(false);
         // チェックボックスがクリックされた時に呼び出されるコールバックリスナーを登録します
-        checkBox1.setOnClickListener(new View.OnClickListener() {
-            
-            // チェックボックスがクリックされた時に呼び出されます
-            public void onClick(View v) {
-                CheckBox checkBox = (CheckBox) v;
-                // チェックボックスのチェック状態を取得します
-                boolean checked = checkBox.isChecked();
-                if(checked)
-                {
-                	sendMessage("l11");
-                }else{
-                	sendMessage("l10");
-                }
+        checkBox1.setOnCheckedChangeListener(new OnCheckedChangeListener(){
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked){
+              if(isChecked){
+            	  sendMessage("l11");
+              } else {
+            	  sendMessage("l10");
+              }
             }
         });
-        CheckBox checkBox2 = (CheckBox) findViewById(id.led2);
+        
+        checkBox2 = (CheckBox) findViewById(R.id.led2);
         // チェックボックスのチェック状態を設定します
         checkBox2.setChecked(false);
         // チェックボックスがクリックされた時に呼び出されるコールバックリスナーを登録します
-        checkBox2.setOnClickListener(new View.OnClickListener() {
-            
-            // チェックボックスがクリックされた時に呼び出されます
-            public void onClick(View v) {
-                CheckBox checkBox = (CheckBox) v;
-                // チェックボックスのチェック状態を取得します
-                boolean checked = checkBox.isChecked();
-                if(checked)
-                {
-                	sendMessage("l21");
-                }else{
-                	sendMessage("l20");
-                }
+        checkBox2.setOnCheckedChangeListener(new OnCheckedChangeListener(){
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked){
+              if(isChecked){
+            	  sendMessage("l21");
+              } else {
+            	  sendMessage("l20");
+              }
             }
         });
-
+        
         // Set up the custom title
         mTitle = (TextView) findViewById(R.id.title_left_text);
         mTitle.setText(R.string.app_name);
@@ -192,6 +211,13 @@ public class DroidControlActivity extends Activity {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        
+    	if(mServer!=null){
+    		try {
+    			mServer.close();
+    		}catch(IOException e){}
+    	}
+        
         // Stop the Bluetooth chat services
         if (mCmdSendService != null) mCmdSendService.stop();
     }
@@ -324,4 +350,82 @@ public class DroidControlActivity extends Activity {
         return false;
     }
 
+    @Override
+    public void run() {
+    	
+    	while(true){
+	        try {
+	        	if(mServer==null){
+	        		mServer = new ServerSocket(mPort);
+	        	}
+	            mSocket = mServer.accept();
+	            BufferedReader in = new BufferedReader(new InputStreamReader(mSocket.getInputStream()));;
+	            String message;
+	            while ((message = in.readLine()) != null){
+                	if(message.length()<1){
+                		continue;
+                	}
+	            	
+	            	if(message.startsWith("s")){
+	            		int progress;
+	            		 String str = message.substring(1,3);
+	            		 try{
+	            			 progress = Integer.parseInt(str);
+	            		 }catch(NumberFormatException e){
+	            			 continue;
+	            		 }
+	            		 final int data = progress;
+	                 	
+	            		 mHandler.post(new Runnable() {
+	 		                @Override
+	 		                public void run() {
+	 		                	seekBar.setProgress(10*data);
+	 		                }
+	 		            });
+	            	}else if(message.startsWith("l")){
+	            		if(message.equals("l10")){
+	            			if(checkBox1.isChecked()){
+	            				 mHandler.post(new Runnable() {
+	     	 		                @Override
+	     	 		                public void run() {
+	     	 		                	checkBox1.setChecked(false);
+	     	 		                }
+	     	 		            });
+	            			}
+	            		}else if(message.equals("l11")){
+	            			if(!checkBox1.isChecked()){
+	            				 mHandler.post(new Runnable() {
+	     	 		                @Override
+	     	 		                public void run() {
+	     	 		                	checkBox1.setChecked(true);
+	     	 		                }
+	     	 		            });
+	            			}
+	            		}else if(message.equals("l20")){
+	            			if(checkBox2.isChecked()){
+	            				 mHandler.post(new Runnable() {
+	     	 		                @Override
+	     	 		                public void run() {
+	     	 		                	checkBox2.setChecked(false);
+	     	 		                }
+	     	 		            });
+	            			}
+	            		}else if(message.equals("l21")){
+	            			if(!checkBox2.isChecked()){
+	            				 mHandler.post(new Runnable() {
+	     	 		                @Override
+	     	 		                public void run() {
+	     	 		                	checkBox2.setChecked(true);
+	     	 		                }
+	     	 		            });
+	            			}
+	            		}
+	            	}
+	            }
+	            
+	        } catch (IOException e) {
+	            //e.printStackTrace();
+	        }
+    	}
+    }
 }
